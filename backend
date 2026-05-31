@@ -1,0 +1,82 @@
+import pandas as pd
+import numpy as np
+from prophet import Prophet
+import datetime
+
+def load_and_preprocess_data():
+    print("1. 데이터셋 로드 및 전처리 시작...")
+    
+    # [참고] 실제 구현 시에는 통계청 엑셀 파일과 환율 API 데이터를 로드합니다.
+    # 여기서는 구조적 매칭을 위해 사전에 전처리된 CSV(날짜, 가격, 환율, 원자재가, 특수수요 플래그)를 활용합니다.
+    # 데이터셋 예시 구조:
+    # ds (날짜) | y (가성비 지수 혹은 부품 가격) | fx_rate (환율) | raw_material (원자재가) | special_demand (특수수요 변수)
+    
+    try:
+        df = pd.read_csv('pc_parts_processed_data.csv')
+    except FileNotFoundError:
+        # 파일이 없을 경우 테스트용 데이터 생성 (실제 운영 시 제거)
+        print("데이터셋 파일이 없어 샘플 데이터를 로드합니다.")
+        df = pd.read_csv('/mnt/data/pc_parts_processed_data.csv')
+        
+    df['ds'] = pd.to_datetime(df['ds'])
+    return df
+
+def train_and_forecast(df):
+    print("2. Prophet 머신러닝 모델 생성 및 추가 회귀 변수 설정...")
+    
+    # 시계열 모델 초기화 (성장 트렌드 및 계절성 반영)
+    model = Prophet(
+        yearly_seasonality=True, 
+        weekly_seasonality=False, 
+        daily_seasonality=False,
+        changepoint_prior_scale=0.05
+    )
+    
+    # 우리가 수집한 다중 외부 변수(Regressors)를 모델에 추가
+    model.add_regressor('fx_rate')
+    model.add_regressor('raw_material')
+    model.add_regressor('special_demand') # 코인 채굴 및 AI 붐 등의 이벤트 패턴 학습
+    
+    # 모델 학습
+    model.fit(df)
+    
+    print("3. 미래 예측 타임라인 생성 (향후 6개월)...")
+    # 미래 6개월(180일) 데이터 프레임 생성
+    future = model.make_future_dataframe(periods=6, freq='M')
+    
+    # [중요] 미래 예측 시점에도 회귀 변수(환율, 원자재 등)의 값이 존재해야 합니다.
+    # 여기서는 가장 최근(현재)의 경제 지표가 유지되거나 완만한 시나리오를 가정한 더미 데이터를 채워넣습니다.
+    last_row = df.iloc[-1]
+    
+    # 기존 데이터 영역 뒤에 붙은 미래 날짜들의 인덱스 추출
+    future_indices = future.index[len(df):]
+    
+    # 미래 공백 데이터에 현재 시점 변수 값들을 매핑 (예측용 가상 시나리오)
+    future['fx_rate'] = df['fx_rate']
+    future['raw_material'] = df['raw_material']
+    future['special_demand'] = df['special_demand']
+    
+    for idx in future_indices:
+        future.loc[idx, 'fx_rate'] = last_row['fx_rate']
+        future.loc[idx, 'raw_material'] = last_row['raw_material']
+        future.loc[idx, 'special_demand'] = 0.0 # 미래에는 특수 수요 거품이 일단 꺼진다고 보수적 가정
+        
+    print("4. 미래 가격 최종 예측 수행...")
+    forecast = model.predict(future)
+    
+    # 필요한 컬럼만 추출 (ds: 날짜, yhat: 예측치, yhat_lower: 오차 하한선, yhat_upper: 오차 상한선)
+    result_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
+    
+    # 실제 과거 정답 데이터(y)와 외부 변수들도 시각화를 위해 최종 결과에 결합
+    final_output = pd.merge(result_df, df[['ds', 'y', 'fx_rate', 'raw_material']], on='ds', how='left')
+    
+    return final_output
+
+if __name__ == "__main__":
+    data = load_and_preprocess_data()
+    forecast_results = train_and_forecast(data)
+    
+    # Flutter 앱이 자산으로 탑재하거나 API로 읽을 수 있도록 파일 저장
+    output_path = 'hvo_forecast_output.csv'
+    forecast_results.to_csv(output_path, index=False)
+    print(f"🎉 성공: 예측 데이터셋이 '{output_path}'에 저장되었습니다.")
